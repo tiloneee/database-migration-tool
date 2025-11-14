@@ -1,0 +1,48 @@
+# .gitignore for Database Migration Tool
+
+# Configuration files with secrets
+config.yaml
+.env
+
+# Binaries
+migrate
+migrate.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Output of go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# SQL dumps
+*.sql
+!scripts/*.sql
+
+# Temporary files
+tmp/
+temp/

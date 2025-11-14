@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  # Remote PostgreSQL - Simulates production/staging database (SOURCE)
+  postgres-remote:
+    image: postgres:15-alpine
+    container_name: "db_remote"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: migration_dev_db
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_remote_data:/var/lib/postgresql/data
+      # Mount initialization scripts - they run in alphabetical order
+      - ./scripts/migrate_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./scripts/seed_data.sql:/docker-entrypoint-initdb.d/02-seed.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - migration-network
+
+  # Local PostgreSQL - Development database (TARGET)
+  postgres-local:
+    image: postgres:15-alpine
+    container_name: "db_local"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: migration_local_db
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_local_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - migration-network
+
+networks:
+  migration-network:
+    driver: bridge
+
+volumes:
+  postgres_remote_data:
+    driver: local
+  postgres_local_data:
+    driver: local
