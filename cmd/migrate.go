@@ -341,12 +341,275 @@ var dockerCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	// Pull command flags
-	pullCmd.Flags().Bool("dry-run", false, "Show what would be done without applying changes")
-	rootCmd.AddCommand(pullCmd)
+// NEW: migrate command for schema versioning
+var migrateSchemaCmd = &cobra.Command{
+	Use:   "migrate",
+	Short: "Manage database schema migrations",
+	Long:  "Create, apply, and rollback versioned database migrations using Ent + Atlas",
+}
 
-	// Schema command flags
+// migrate create - Generate new migration
+var migrateCreateCmd = &cobra.Command{
+	Use:   "create [name]",
+	Short: "Create new migration from Ent schema changes",
+	Long:  "Generates UP migration automatically. You must write DOWN migration manually.",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := setupContext()
+		migrationName := args[0]
+
+		logger.Info("Creating new migration", zap.String("name", migrationName))
+
+		versionMgr := migrator.NewVersionManager("./migrations")
+
+		if err := versionMgr.CreateMigration(ctx, migrationName); err != nil {
+			logger.Fatal("Failed to create migration", zap.Error(err))
+		}
+
+		logger.Info("✅ Migration created successfully!")
+		logger.Info("⚠️  IMPORTANT: Write the DOWN migration manually!")
+		fmt.Printf("\n📝 Edit the DOWN migration: migrations/*_%s.down.sql\n", migrationName)
+	},
+}
+
+// migrate up - Apply migrations
+var migrateUpCmd = &cobra.Command{
+	Use:   "up",
+	Short: "Apply pending migrations",
+	Long:  "Applies all pending migrations to bring database schema up to date",
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := setupContext()
+
+		target, _ := cmd.Flags().GetString("target")
+
+		logger.Info("Applying migrations", zap.String("target", target))
+
+		versionMgr := migrator.NewVersionManager("./migrations")
+
+		var targetDB *config.DatabaseConfig
+		if target == "local" {
+			targetDB = &cfg.Local
+		} else {
+			targetDB = &cfg.Remote
+		}
+
+		applied, err := versionMgr.ApplyMigrations(ctx, targetDB)
+		if err != nil {
+			logger.Fatal("Migration failed", zap.Error(err))
+		}
+
+		logger.Info("✅ Migrations applied successfully!", zap.Int("count", applied))
+	},
+}
+
+// migrate down - Rollback migrations
+var migrateDownCmd = &cobra.Command{
+	Use:   "down [steps]",
+	Short: "Rollback migrations",
+	Long:  "Rolls back the specified number of migrations (default: 1)",
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := setupContext()
+
+		steps := 1
+		if len(args) > 0 {
+			fmt.Sscanf(args[0], "%d", &steps)
+		}
+
+		target, _ := cmd.Flags().GetString("target")
+
+		logger.Info("Rolling back migrations",
+			zap.Int("steps", steps),
+			zap.String("target", target))
+
+		versionMgr := migrator.NewVersionManager("./migrations")
+
+		var targetDB *config.DatabaseConfig
+		if target == "local" {
+			targetDB = &cfg.Local
+		} else {
+			targetDB = &cfg.Remote
+		}
+
+		if err := versionMgr.RollbackMigrations(ctx, targetDB, steps); err != nil {
+			logger.Fatal("Rollback failed", zap.Error(err))
+		}
+
+		logger.Info("✅ Rollback completed successfully!")
+	},
+}
+
+// migrate status - Show migration status
+var migrateStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show migration status",
+	Long:  "Displays applied and pending migrations",
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := setupContext()
+
+		target, _ := cmd.Flags().GetString("target")
+
+		versionMgr := migrator.NewVersionManager("./migrations")
+
+		var targetDB *config.DatabaseConfig
+		if target == "local" {
+			targetDB = &cfg.Local
+		} else {
+			targetDB = &cfg.Remote
+		}
+
+		status, err := versionMgr.GetStatus(ctx, targetDB)
+		if err != nil {
+			logger.Fatal("Failed to get status", zap.Error(err))
+		}
+
+		fmt.Println(status)
+	},
+}
+
+// NEW: push command - Like git push (local -> remote)
+var pushCmd = &cobra.Command{
+	Use:   "push",
+	Short: "Push changes to remote database",
+	Long:  "Pushes schema migrations and data from local to remote database (like git push)",
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := setupContext()
+
+		schemaOnly, _ := cmd.Flags().GetBool("schema-only")
+		dataOnly, _ := cmd.Flags().GetBool("data-only")
+
+		logger.Info("🚀 Pushing to remote database...")
+
+		// Apply schema migrations to remote
+		if !dataOnly {
+			logger.Info("Step 1/2: Pushing schema migrations to remote")
+			versionMgr := migrator.NewVersionManager("./migrations")
+			applied, err := versionMgr.ApplyMigrations(ctx, &cfg.Remote)
+			if err != nil {
+				logger.Fatal("Failed to push schema", zap.Error(err))
+			}
+			logger.Info("✅ Schema pushed", zap.Int("migrations", applied))
+		}
+
+		// Sync data to remote
+		if !schemaOnly {
+			logger.Info("Step 2/2: Pushing data to remote")
+
+			localDB, remoteDB := connectDatabases(ctx)
+			defer localDB.Close()
+			defer remoteDB.Close()
+
+			dataMigrator := migrator.NewDataMigrator(localDB, remoteDB, &cfg.Migration)
+			results, err := dataMigrator.MigrateAll(ctx)
+			if err != nil {
+				logger.Fatal("Failed to push data", zap.Error(err))
+			}
+
+			successful := 0
+			totalRows := int64(0)
+			for _, r := range results {
+				if r.Success {
+					successful++
+					totalRows += r.RowsMigrated
+				}
+			}
+
+			logger.Info("✅ Data pushed",
+				zap.Int("tables", successful),
+				zap.Int64("rows", totalRows))
+		}
+
+		logger.Info("🎉 Push completed successfully!")
+	},
+}
+
+// pullCmd updated - Now pulls from remote to local (like git pull)
+var newPullCmd = &cobra.Command{
+	Use:   "pull",
+	Short: "Pull changes from remote database",
+	Long:  "Pulls schema migrations and data from remote to local database (like git pull)",
+	Run: func(cmd *cobra.Command, args []string) {
+		ctx := setupContext()
+
+		schemaOnly, _ := cmd.Flags().GetBool("schema-only")
+		dataOnly, _ := cmd.Flags().GetBool("data-only")
+
+		logger.Info("⬇️  Pulling from remote database...")
+
+		// Ensure Docker container is running
+		if err := dockerClient.EnsureRunning(ctx); err != nil {
+			logger.Fatal("Failed to ensure Docker container is running", zap.Error(err))
+		}
+
+		time.Sleep(2 * time.Second)
+
+		// Apply schema migrations to local
+		if !dataOnly {
+			logger.Info("Step 1/2: Pulling schema migrations to local")
+			versionMgr := migrator.NewVersionManager("./migrations")
+			applied, err := versionMgr.ApplyMigrations(ctx, &cfg.Local)
+			if err != nil {
+				logger.Fatal("Failed to pull schema", zap.Error(err))
+			}
+			logger.Info("✅ Schema pulled", zap.Int("migrations", applied))
+		}
+
+		// Sync data to local
+		if !schemaOnly {
+			logger.Info("Step 2/2: Pulling data to local")
+
+			remoteDB, localDB := connectDatabases(ctx)
+			defer remoteDB.Close()
+			defer localDB.Close()
+
+			dataMigrator := migrator.NewDataMigrator(remoteDB, localDB, &cfg.Migration)
+			results, err := dataMigrator.MigrateAll(ctx)
+			if err != nil {
+				logger.Fatal("Failed to pull data", zap.Error(err))
+			}
+
+			successful := 0
+			totalRows := int64(0)
+			for _, r := range results {
+				if r.Success {
+					successful++
+					totalRows += r.RowsMigrated
+				}
+			}
+
+			logger.Info("✅ Data pulled",
+				zap.Int("tables", successful),
+				zap.Int64("rows", totalRows))
+		}
+
+		logger.Info("🎉 Pull completed successfully!")
+	},
+}
+
+func init() {
+	// Migration command tree
+	migrateSchemaCmd.AddCommand(migrateCreateCmd)
+	migrateSchemaCmd.AddCommand(migrateUpCmd)
+	migrateSchemaCmd.AddCommand(migrateDownCmd)
+	migrateSchemaCmd.AddCommand(migrateStatusCmd)
+
+	// Flags for migrate up/down/status
+	migrateUpCmd.Flags().String("target", "local", "Target database: local or remote")
+	migrateDownCmd.Flags().String("target", "local", "Target database: local or remote")
+	migrateStatusCmd.Flags().String("target", "local", "Target database: local or remote")
+
+	rootCmd.AddCommand(migrateSchemaCmd)
+
+	// Push command (local -> remote)
+	pushCmd.Flags().Bool("schema-only", false, "Push schema migrations only")
+	pushCmd.Flags().Bool("data-only", false, "Push data only")
+	rootCmd.AddCommand(pushCmd)
+
+	// Pull command (remote -> local) - Replace old pullCmd
+	newPullCmd.Flags().Bool("schema-only", false, "Pull schema migrations only")
+	newPullCmd.Flags().Bool("data-only", false, "Pull data only")
+	rootCmd.AddCommand(newPullCmd)
+
+	// Schema command flags (keep for backward compatibility)
 	schemaCmd.Flags().String("action", "apply", "Action to perform: diff, apply, or export")
 	schemaCmd.Flags().Bool("dry-run", false, "Show what would be done without applying changes")
 	schemaCmd.Flags().String("output", "schema.sql", "Output file for export action")
